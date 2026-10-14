@@ -1,6 +1,6 @@
 [package]
 name = "sweepr"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Find the junk your dev work left behind, sorted into safe-to-clean and needs-you."
 license = "MIT"
