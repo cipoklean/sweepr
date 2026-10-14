@@ -23,6 +23,26 @@ cargo run -- purge                # delete batches older than 7 days for good
 cargo run -- clean --docker       # also prune Docker dangling images and build cache
 ```
 
+### Terminal UI
+
+```sh
+cargo run -- tui            # or: cargo run -- tui ~/code --idle-days 60
+```
+
+Two tabs, **Safe to clean** and **Needs you**, with a note for the highlighted item. Safe items start ticked; nothing in Needs you is ticked unless you tick it yourself.
+
+| Key | Does |
+|---|---|
+| ↑ ↓ / j k | Move |
+| Space | Tick or untick |
+| a | Tick or untick everything in the tab |
+| Tab / ← → | Switch tab |
+| c | Clean ticked items (asks first; files go to quarantine) |
+| u | Undo the last clean |
+| q | Quit |
+
+Docker volumes, containers and tagged images show as `[-]` and can't be ticked.
+
 ### Notes, with or without AI
 
 ```sh
@@ -87,7 +107,7 @@ NEEDS YOU  52.4 GB  (12 items)
 2. ~~Clean command with a 7-day quarantine and undo~~
 3. ~~Docker images, volumes and build cache~~
 4. ~~AI notes that explain every item in plain words (metadata only, never file contents)~~
-5. Terminal UI, then a desktop app
+5. ~~Terminal UI~~, then a desktop app
 6. One-line installers on GitHub Releases
 
 ## License
