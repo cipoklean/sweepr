@@ -1,4 +1,5 @@
 mod docker;
+mod notes;
 mod quarantine;
 mod rules;
 mod scan;
@@ -47,6 +48,16 @@ enum Cmd {
         /// Rows to show per bucket.
         #[arg(long, default_value_t = 25)]
         top: usize,
+        /// Add a plain-words note to every item (written locally, works offline).
+        #[arg(long)]
+        notes: bool,
+        /// Write the notes with an AI model: local Ollama by default, or any OpenAI-compatible
+        /// API via SWEEPR_AI_URL, SWEEPR_AI_MODEL and SWEEPR_AI_KEY. Sends metadata only.
+        #[arg(long)]
+        ai: bool,
+        /// Print exactly what --ai would send, and send nothing.
+        #[arg(long)]
+        show_ai_payload: bool,
     },
     /// Move every "Safe to clean" item into quarantine. "Needs you" items are never touched.
     Clean {
@@ -81,14 +92,54 @@ fn main() {
     let Cli { cmd } = Cli::parse();
     let base = quarantine::base_dir();
     match cmd {
-        Cmd::Scan { scan, json, top } => {
+        Cmd::Scan { scan, json, top, notes, ai, show_ai_payload } => {
             let started = std::time::Instant::now();
             let items = run_scan(scan);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&items).unwrap());
+            // Notes cover the rows the report shows, so AI calls stay small.
+            let shown: Vec<&scan::Item> = [Bucket::Safe, Bucket::NeedsYou]
+                .iter()
+                .flat_map(|b| items.iter().filter(move |i| i.bucket == *b).take(top))
+                .collect();
+            if show_ai_payload {
+                let cfg = notes::AiConfig::from_env();
+                println!("POST {}/chat/completions", cfg.url.trim_end_matches('/'));
+                println!("{}", serde_json::to_string_pretty(&notes::payload(&shown, &cfg.model)).unwrap());
                 return;
             }
-            print_report(&items, top);
+            let mut note_map: std::collections::HashMap<std::path::PathBuf, String> = Default::default();
+            if notes || ai {
+                let written = if ai {
+                    let cfg = notes::AiConfig::from_env();
+                    if !json {
+                        eprintln!("Asking {} for notes on {} items (metadata only)…", cfg.model, shown.len());
+                    }
+                    match notes::ai(&shown, &cfg) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("AI notes unavailable ({e}). Using built-in notes.");
+                            shown.iter().map(|i| notes::builtin(i)).collect()
+                        }
+                    }
+                } else {
+                    shown.iter().map(|i| notes::builtin(i)).collect()
+                };
+                for (i, n) in shown.iter().zip(written) {
+                    note_map.insert(i.path.clone(), n);
+                }
+            }
+            if json {
+                #[derive(serde::Serialize)]
+                struct Row<'a> {
+                    #[serde(flatten)]
+                    item: &'a scan::Item,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    note: Option<&'a String>,
+                }
+                let rows: Vec<Row> = items.iter().map(|i| Row { item: i, note: note_map.get(&i.path) }).collect();
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+                return;
+            }
+            print_report(&items, top, &note_map);
             let safe: u64 = items.iter().filter(|i| i.bucket == Bucket::Safe).map(|i| i.bytes).sum();
             println!(
                 "\nScanned in {:.1}s. {} could be freed safely. Nothing was deleted. Run `sweepr clean` to free it.",
@@ -272,7 +323,7 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1)
 }
 
-fn print_report(items: &[scan::Item], top: usize) {
+fn print_report(items: &[scan::Item], top: usize, notes: &std::collections::HashMap<PathBuf, String>) {
     for (bucket, title) in [(Bucket::Safe, "SAFE TO CLEAN"), (Bucket::NeedsYou, "NEEDS YOU")] {
         let rows: Vec<_> = items.iter().filter(|i| i.bucket == bucket).collect();
         let total: u64 = rows.iter().map(|i| i.bytes).sum();
@@ -280,7 +331,7 @@ fn print_report(items: &[scan::Item], top: usize) {
         println!("{}", "-".repeat(72));
         for i in rows.iter().take(top) {
             println!("{:>10}  {:<22} {}", human(i.bytes), i.kind.label(), i.path.display());
-            println!("{:>10}  {}", "", i.reason);
+            println!("{:>10}  {}", "", notes.get(&i.path).unwrap_or(&i.reason));
         }
         if rows.len() > top {
             println!("{:>10}  … {} more (use --top)", "", rows.len() - top);
