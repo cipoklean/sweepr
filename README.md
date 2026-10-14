@@ -7,7 +7,25 @@
 
 > Status: early. `sweepr clean` never deletes anything outright: it moves items to a quarantine you can undo for 7 days.
 
-## Try it
+## Install
+
+macOS and Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/cipoklean/sweepr/releases/latest/download/sweepr-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/cipoklean/sweepr/releases/latest/download/sweepr-installer.ps1 | iex"
+```
+
+Then run `sweepr tui`. Prebuilt for macOS (Apple Silicon and Intel), Linux (x86_64 and ARM64) and Windows x86_64; each download has a SHA-256 checksum on the [releases page](https://github.com/cipoklean/sweepr/releases). The builds aren't code-signed yet, so macOS or Windows may warn the first time.
+
+## Try it from source
+
+The commands below use `cargo run --`; with an installed binary, use `sweepr` instead.
 
 ```sh
 cargo run -- scan                 # scan your home folder
@@ -108,7 +126,7 @@ NEEDS YOU  52.4 GB  (12 items)
 3. ~~Docker images, volumes and build cache~~
 4. ~~AI notes that explain every item in plain words (metadata only, never file contents)~~
 5. ~~Terminal UI~~, then a desktop app
-6. One-line installers on GitHub Releases
+6. ~~One-line installers~~ on GitHub Releases
 
 ## License
 
