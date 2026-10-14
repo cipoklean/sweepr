@@ -1,3 +1,4 @@
+mod docker;
 mod quarantine;
 mod rules;
 mod scan;
@@ -29,6 +30,9 @@ struct ScanArgs {
     /// Skip package caches, emulator images and Downloads in your home folder.
     #[arg(long)]
     no_global: bool,
+    /// Skip Docker images, build cache, volumes and containers.
+    #[arg(long)]
+    no_docker: bool,
 }
 
 #[derive(Subcommand)]
@@ -54,6 +58,9 @@ enum Cmd {
         /// Don't ask for confirmation.
         #[arg(short, long)]
         yes: bool,
+        /// Also prune Docker dangling images and build cache. Can't be undone.
+        #[arg(long)]
+        docker: bool,
     },
     /// Put a cleaned batch back where it came from (default: the latest).
     Undo {
@@ -89,49 +96,81 @@ fn main() {
                 human(safe)
             );
         }
-        Cmd::Clean { scan, dry_run, yes } => {
+        Cmd::Clean { scan, dry_run, yes, docker } => {
             auto_purge(&base);
-            let items: Vec<_> = run_scan(scan).into_iter().filter(|i| i.bucket == Bucket::Safe).collect();
-            if items.is_empty() {
+            let safe: Vec<_> = run_scan(scan).into_iter().filter(|i| i.bucket == Bucket::Safe).collect();
+            let (dock, files): (Vec<_>, Vec<_>) = safe.into_iter().partition(|i| i.kind.is_docker());
+            if files.is_empty() && (dock.is_empty() || !docker) {
                 println!("Nothing safe to clean. 🎉");
+                docker_hint(&dock, docker);
                 return;
             }
-            let total: u64 = items.iter().map(|i| i.bytes).sum();
-            println!("Sweepr will move {} items ({}) to quarantine:\n", items.len(), human(total));
-            for i in &items {
-                println!("{:>10}  {:<22} {}", human(i.bytes), i.kind.label(), i.path.display());
+            if !files.is_empty() {
+                let total: u64 = files.iter().map(|i| i.bytes).sum();
+                println!("Sweepr will move {} items ({}) to quarantine:\n", files.len(), human(total));
+                for i in &files {
+                    println!("{:>10}  {:<22} {}", human(i.bytes), i.kind.label(), i.path.display());
+                }
+            }
+            if docker && !dock.is_empty() {
+                let total: u64 = dock.iter().map(|i| i.bytes).sum();
+                println!("\nDocker will prune {} ({}). This can't be undone; Docker rebuilds or re-pulls what it needs:\n", plural(dock.len()), human(total));
+                for i in &dock {
+                    println!("{:>10}  {:<22} {}", human(i.bytes), i.kind.label(), i.path.display());
+                }
             }
             if dry_run {
                 println!("\nDry run: nothing moved.");
+                docker_hint(&dock, docker);
                 return;
             }
-            if !yes && !confirm(&format!("\nMove {} to quarantine? You can undo for {} days. [y/N] ", human(total), quarantine::KEEP_DAYS)) {
-                println!("Cancelled. Nothing moved.");
-                return;
-            }
-            let list: Vec<_> = items
-                .iter()
-                .map(|i| (i.path.clone(), i.bytes, i.kind.label().to_string()))
-                .collect();
-            match quarantine::quarantine(&base, &list) {
-                Ok(out) => {
-                    for (p, why) in &out.skipped {
-                        eprintln!("skipped {}: {why}", p.display());
+
+            if !files.is_empty() {
+                let total: u64 = files.iter().map(|i| i.bytes).sum();
+                if yes || confirm(&format!("\nMove {} to quarantine? You can undo for {} days. [y/N] ", human(total), quarantine::KEEP_DAYS)) {
+                    let list: Vec<_> = files
+                        .iter()
+                        .map(|i| (i.path.clone(), i.bytes, i.kind.label().to_string()))
+                        .collect();
+                    match quarantine::quarantine(&base, &list) {
+                        Ok(out) => {
+                            for (p, why) in &out.skipped {
+                                eprintln!("skipped {}: {why}", p.display());
+                            }
+                            if out.batch.entries.is_empty() {
+                                println!("Nothing was moved.");
+                            } else {
+                                println!(
+                                    "\nMoved {} items ({}) to quarantine as batch {}.\nUndo with `sweepr undo`. They're deleted for good after {} days, or now with `sweepr purge --all`.",
+                                    out.batch.entries.len(),
+                                    human(out.batch.bytes()),
+                                    out.batch.id,
+                                    quarantine::KEEP_DAYS
+                                );
+                            }
+                        }
+                        Err(e) => fail(&format!("could not create quarantine at {}: {e}", base.display())),
                     }
-                    if out.batch.entries.is_empty() {
-                        println!("Nothing was moved.");
-                    } else {
-                        println!(
-                            "\nMoved {} items ({}) to quarantine as batch {}.\nUndo with `sweepr undo`. They're deleted for good after {} days, or now with `sweepr purge --all`.",
-                            out.batch.entries.len(),
-                            human(out.batch.bytes()),
-                            out.batch.id,
-                            quarantine::KEEP_DAYS
-                        );
-                    }
+                } else {
+                    println!("Skipped. Nothing moved to quarantine.");
                 }
-                Err(e) => fail(&format!("could not create quarantine at {}: {e}", base.display())),
             }
+
+            if docker && !dock.is_empty() {
+                let total: u64 = dock.iter().map(|i| i.bytes).sum();
+                if yes || confirm(&format!("\nPrune {} of Docker data? This can't be undone. [y/N] ", human(total))) {
+                    let refs: Vec<_> = dock.iter().collect();
+                    for args in docker::prune_commands(&refs) {
+                        match docker::run(&args) {
+                            Ok(()) => println!("ran docker {}", args.join(" ")),
+                            Err(e) => eprintln!("docker {} failed: {e}", args.join(" ")),
+                        }
+                    }
+                } else {
+                    println!("Skipped Docker.");
+                }
+            }
+            docker_hint(&dock, docker);
         }
         Cmd::Undo { id } => {
             let id = match id.or_else(|| quarantine::list(&base).first().map(|b| b.id.clone())) {
@@ -191,10 +230,25 @@ fn run_scan(a: ScanArgs) -> Vec<scan::Item> {
         large_file_mb: a.large_mb,
         include_global: !a.no_global,
     });
+    if !a.no_global && !a.no_docker {
+        items.extend(docker::detect());
+        items.sort_by(|x, y| y.bytes.cmp(&x.bytes));
+    }
     // Never offer anything already sitting in quarantine.
     let q = quarantine::base_dir();
     items.retain(|i| !i.path.starts_with(&q));
     items
+}
+
+fn docker_hint(dock: &[scan::Item], docker: bool) {
+    if !docker && !dock.is_empty() {
+        let total: u64 = dock.iter().map(|i| i.bytes).sum();
+        println!("\n{} Docker can free ({}) left alone. Add --docker to prune them too.", plural(dock.len()), human(total));
+    }
+}
+
+fn plural(n: usize) -> String {
+    if n == 1 { "1 item".into() } else { format!("{n} items") }
 }
 
 fn auto_purge(base: &std::path::Path) {
