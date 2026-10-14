@@ -20,7 +20,22 @@ cargo run -- clean                # move every Safe item to quarantine (asks fir
 cargo run -- quarantine           # list cleaned batches and days left to undo
 cargo run -- undo                 # put the latest batch back
 cargo run -- purge                # delete batches older than 7 days for good
+cargo run -- clean --docker       # also prune Docker dangling images and build cache
 ```
+
+### Docker
+
+When Docker is installed and running, `scan` reads it with `docker system df -v` (use `--no-docker` to skip):
+
+| Item | Bucket | Why |
+|---|---|---|
+| Dangling images (`<none>:<none>`, no container) | Safe to clean | Leftovers from rebuilds |
+| Build cache not in use | Safe to clean | Docker rebuilds it on the next build |
+| Tagged images no container uses | Needs you | You may still run them |
+| Volumes with no container attached | Needs you | Often hold database data |
+| Stopped containers | Needs you | Changes inside them are lost on removal |
+
+Docker data can't be quarantined, so `clean` only prunes it when you pass `--docker`, asks separately, and only runs `docker image prune -f` and `docker builder prune -a -f`. Volumes, containers and tagged images are never removed by Sweepr.
 
 `clean` only ever touches the **Safe to clean** list. **Needs you** items are never moved. Undo refuses to overwrite anything that has since appeared at the original path, and items on another drive are skipped rather than copied. Quarantine lives in your OS data folder (set `SWEEPR_HOME` to move it); expired batches are cleared the next time you run `clean`.
 
@@ -52,7 +67,7 @@ NEEDS YOU  52.4 GB  (12 items)
 
 1. ~~Scanner and size report~~
 2. ~~Clean command with a 7-day quarantine and undo~~
-3. Docker images, volumes and build cache
+3. ~~Docker images, volumes and build cache~~
 4. AI notes that explain every item in plain words (metadata only, never file contents)
 5. Terminal UI, then a desktop app
 6. One-line installers on GitHub Releases
