@@ -3,6 +3,7 @@ mod notes;
 mod quarantine;
 mod rules;
 mod scan;
+mod tui;
 
 use clap::{Args, Parser, Subcommand};
 use rules::Bucket;
@@ -72,6 +73,11 @@ enum Cmd {
         /// Also prune Docker dangling images and build cache. Can't be undone.
         #[arg(long)]
         docker: bool,
+    },
+    /// Interactive view: browse, tick, read notes, clean and undo with single keys.
+    Tui {
+        #[command(flatten)]
+        scan: ScanArgs,
     },
     /// Put a cleaned batch back where it came from (default: the latest).
     Undo {
@@ -222,6 +228,14 @@ fn main() {
                 }
             }
             docker_hint(&dock, docker);
+        }
+        Cmd::Tui { scan } => {
+            auto_purge(&base);
+            eprintln!("Scanning…");
+            let items = run_scan(scan);
+            if let Err(e) = tui::run(items) {
+                fail(&format!("terminal UI failed: {e}"));
+            }
         }
         Cmd::Undo { id } => {
             let id = match id.or_else(|| quarantine::list(&base).first().map(|b| b.id.clone())) {
