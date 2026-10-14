@@ -1,12 +1,14 @@
+mod quarantine;
 mod rules;
 mod scan;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use rules::Bucket;
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 /// Find the junk your dev work left behind, sorted into safe-to-clean and needs-you.
-/// Sweepr only reports for now: it never deletes anything.
+/// Cleaning moves items to a quarantine you can undo for 7 days.
 #[derive(Parser)]
 #[command(name = "sweepr", version, about)]
 struct Cli {
@@ -14,21 +16,27 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Args)]
+struct ScanArgs {
+    /// Folders to scan (default: your home folder).
+    paths: Vec<PathBuf>,
+    /// A project counts as idle after this many days without changes.
+    #[arg(long, default_value_t = 30)]
+    idle_days: u64,
+    /// Flag single files at least this big, in MB.
+    #[arg(long, default_value_t = 500)]
+    large_mb: u64,
+    /// Skip package caches, emulator images and Downloads in your home folder.
+    #[arg(long)]
+    no_global: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scan folders and print what can be cleaned.
+    /// Scan folders and print what can be cleaned. Deletes nothing.
     Scan {
-        /// Folders to scan (default: your home folder).
-        paths: Vec<PathBuf>,
-        /// A project counts as idle after this many days without changes.
-        #[arg(long, default_value_t = 30)]
-        idle_days: u64,
-        /// Flag single files at least this big, in MB.
-        #[arg(long, default_value_t = 500)]
-        large_mb: u64,
-        /// Skip package caches, emulator images and Downloads in your home folder.
-        #[arg(long)]
-        no_global: bool,
+        #[command(flatten)]
+        scan: ScanArgs,
         /// Print JSON instead of the report.
         #[arg(long)]
         json: bool,
@@ -36,34 +44,181 @@ enum Cmd {
         #[arg(long, default_value_t = 25)]
         top: usize,
     },
+    /// Move every "Safe to clean" item into quarantine. "Needs you" items are never touched.
+    Clean {
+        #[command(flatten)]
+        scan: ScanArgs,
+        /// Show what would move, and stop.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Put a cleaned batch back where it came from (default: the latest).
+    Undo {
+        /// Batch id from `sweepr quarantine`.
+        id: Option<String>,
+    },
+    /// List batches waiting in quarantine.
+    Quarantine,
+    /// Permanently delete batches older than 7 days.
+    Purge {
+        /// Delete every batch now, including ones still inside the undo window.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 fn main() {
     let Cli { cmd } = Cli::parse();
+    let base = quarantine::base_dir();
     match cmd {
-        Cmd::Scan { paths, idle_days, large_mb, no_global, json, top } => {
-            let roots = if paths.is_empty() {
-                vec![dirs::home_dir().expect("no home folder found")]
-            } else {
-                paths
-            };
+        Cmd::Scan { scan, json, top } => {
             let started = std::time::Instant::now();
-            let items = scan::scan(&scan::Options {
-                roots,
-                idle_days,
-                large_file_mb: large_mb,
-                include_global: !no_global,
-            });
+            let items = run_scan(scan);
             if json {
                 println!("{}", serde_json::to_string_pretty(&items).unwrap());
                 return;
             }
-            print_report(&items, top, started.elapsed());
+            print_report(&items, top);
+            let safe: u64 = items.iter().filter(|i| i.bucket == Bucket::Safe).map(|i| i.bytes).sum();
+            println!(
+                "\nScanned in {:.1}s. {} could be freed safely. Nothing was deleted. Run `sweepr clean` to free it.",
+                started.elapsed().as_secs_f64(),
+                human(safe)
+            );
+        }
+        Cmd::Clean { scan, dry_run, yes } => {
+            auto_purge(&base);
+            let items: Vec<_> = run_scan(scan).into_iter().filter(|i| i.bucket == Bucket::Safe).collect();
+            if items.is_empty() {
+                println!("Nothing safe to clean. 🎉");
+                return;
+            }
+            let total: u64 = items.iter().map(|i| i.bytes).sum();
+            println!("Sweepr will move {} items ({}) to quarantine:\n", items.len(), human(total));
+            for i in &items {
+                println!("{:>10}  {:<22} {}", human(i.bytes), i.kind.label(), i.path.display());
+            }
+            if dry_run {
+                println!("\nDry run: nothing moved.");
+                return;
+            }
+            if !yes && !confirm(&format!("\nMove {} to quarantine? You can undo for {} days. [y/N] ", human(total), quarantine::KEEP_DAYS)) {
+                println!("Cancelled. Nothing moved.");
+                return;
+            }
+            let list: Vec<_> = items
+                .iter()
+                .map(|i| (i.path.clone(), i.bytes, i.kind.label().to_string()))
+                .collect();
+            match quarantine::quarantine(&base, &list) {
+                Ok(out) => {
+                    for (p, why) in &out.skipped {
+                        eprintln!("skipped {}: {why}", p.display());
+                    }
+                    if out.batch.entries.is_empty() {
+                        println!("Nothing was moved.");
+                    } else {
+                        println!(
+                            "\nMoved {} items ({}) to quarantine as batch {}.\nUndo with `sweepr undo`. They're deleted for good after {} days, or now with `sweepr purge --all`.",
+                            out.batch.entries.len(),
+                            human(out.batch.bytes()),
+                            out.batch.id,
+                            quarantine::KEEP_DAYS
+                        );
+                    }
+                }
+                Err(e) => fail(&format!("could not create quarantine at {}: {e}", base.display())),
+            }
+        }
+        Cmd::Undo { id } => {
+            let id = match id.or_else(|| quarantine::list(&base).first().map(|b| b.id.clone())) {
+                Some(id) => id,
+                None => {
+                    println!("Quarantine is empty, nothing to undo.");
+                    return;
+                }
+            };
+            match quarantine::restore(&base, &id) {
+                Ok(out) => {
+                    for p in &out.restored {
+                        println!("restored {}", p.display());
+                    }
+                    for (p, why) in &out.failed {
+                        eprintln!("kept in quarantine {}: {why}", p.display());
+                    }
+                    println!("Restored {} items from batch {id}.", out.restored.len());
+                }
+                Err(e) => fail(&format!("no batch {id}: {e}")),
+            }
+        }
+        Cmd::Quarantine => {
+            let batches = quarantine::list(&base);
+            if batches.is_empty() {
+                println!("Quarantine is empty.");
+                return;
+            }
+            println!("{:<14} {:>10} {:>6}  {}", "BATCH", "SIZE", "ITEMS", "AGE");
+            for b in &batches {
+                let left = quarantine::KEEP_DAYS.saturating_sub(b.age_days());
+                println!("{:<14} {:>10} {:>6}  {} days old, {} left to undo", b.id, human(b.bytes()), b.entries.len(), b.age_days(), left);
+            }
+        }
+        Cmd::Purge { all } => {
+            if all && !confirm("Permanently delete everything in quarantine? This can't be undone. [y/N] ") {
+                println!("Cancelled.");
+                return;
+            }
+            match quarantine::purge(&base, all) {
+                Ok((n, bytes)) => println!("Deleted {n} batches for good, freeing {}.", human(bytes)),
+                Err(e) => fail(&format!("purge failed: {e}")),
+            }
         }
     }
 }
 
-fn print_report(items: &[scan::Item], top: usize, took: std::time::Duration) {
+fn run_scan(a: ScanArgs) -> Vec<scan::Item> {
+    let roots = if a.paths.is_empty() {
+        vec![dirs::home_dir().expect("no home folder found")]
+    } else {
+        a.paths
+    };
+    let mut items = scan::scan(&scan::Options {
+        roots,
+        idle_days: a.idle_days,
+        large_file_mb: a.large_mb,
+        include_global: !a.no_global,
+    });
+    // Never offer anything already sitting in quarantine.
+    let q = quarantine::base_dir();
+    items.retain(|i| !i.path.starts_with(&q));
+    items
+}
+
+fn auto_purge(base: &std::path::Path) {
+    if let Ok((n, bytes)) = quarantine::purge(base, false) {
+        if n > 0 {
+            println!("Cleared {n} expired quarantine batches ({}).\n", human(bytes));
+        }
+    }
+}
+
+fn confirm(prompt: &str) -> bool {
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).ok();
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("sweepr: {msg}");
+    std::process::exit(1)
+}
+
+fn print_report(items: &[scan::Item], top: usize) {
     for (bucket, title) in [(Bucket::Safe, "SAFE TO CLEAN"), (Bucket::NeedsYou, "NEEDS YOU")] {
         let rows: Vec<_> = items.iter().filter(|i| i.bucket == bucket).collect();
         let total: u64 = rows.iter().map(|i| i.bytes).sum();
@@ -77,8 +232,6 @@ fn print_report(items: &[scan::Item], top: usize, took: std::time::Duration) {
             println!("{:>10}  … {} more (use --top)", "", rows.len() - top);
         }
     }
-    let safe: u64 = items.iter().filter(|i| i.bucket == Bucket::Safe).map(|i| i.bytes).sum();
-    println!("\nScanned in {:.1}s. {} could be freed safely. Nothing was deleted.", took.as_secs_f64(), human(safe));
 }
 
 fn human(b: u64) -> String {
