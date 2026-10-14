@@ -23,6 +23,24 @@ cargo run -- purge                # delete batches older than 7 days for good
 cargo run -- clean --docker       # also prune Docker dangling images and build cache
 ```
 
+### Notes, with or without AI
+
+```sh
+cargo run -- scan --notes                # a plain-words note per item, written locally (offline)
+cargo run -- scan --ai                   # notes written by an AI model
+cargo run -- scan --show-ai-payload      # print exactly what --ai would send, send nothing
+```
+
+`--ai` talks to any OpenAI-compatible chat API. By default it uses [Ollama](https://ollama.com) on your own machine (`http://localhost:11434/v1`, model `llama3.2`), so nothing leaves your laptop. Point it elsewhere with:
+
+```sh
+export SWEEPR_AI_URL=https://api.openai.com/v1   # or Groq, OpenRouter, LM Studio, ...
+export SWEEPR_AI_MODEL=gpt-4o-mini
+export SWEEPR_AI_KEY=...
+```
+
+**Privacy:** only metadata is sent: the item's kind, size, age, bucket, the project folder's name, and a file's extension. Never file contents, full paths or file names. If the model can't be reached, Sweepr falls back to the built-in notes.
+
 ### Docker
 
 When Docker is installed and running, `scan` reads it with `docker system df -v` (use `--no-docker` to skip):
@@ -68,7 +86,7 @@ NEEDS YOU  52.4 GB  (12 items)
 1. ~~Scanner and size report~~
 2. ~~Clean command with a 7-day quarantine and undo~~
 3. ~~Docker images, volumes and build cache~~
-4. AI notes that explain every item in plain words (metadata only, never file contents)
+4. ~~AI notes that explain every item in plain words (metadata only, never file contents)~~
 5. Terminal UI, then a desktop app
 6. One-line installers on GitHub Releases
 
