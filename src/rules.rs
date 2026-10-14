@@ -25,6 +25,11 @@ pub enum Kind {
     AndroidAvd,
     OldInstaller,
     LargeFile,
+    DockerBuildCache,
+    DockerDanglingImage,
+    DockerImage,
+    DockerVolume,
+    DockerContainer,
 }
 
 impl Kind {
@@ -40,6 +45,11 @@ impl Kind {
             Kind::AndroidAvd => "Android emulator image",
             Kind::OldInstaller => "Old installer",
             Kind::LargeFile => "Large file",
+            Kind::DockerBuildCache => "Docker build cache",
+            Kind::DockerDanglingImage => "Docker dangling image",
+            Kind::DockerImage => "Docker image (unused)",
+            Kind::DockerVolume => "Docker volume (unused)",
+            Kind::DockerContainer => "Docker container (stopped)",
         }
     }
 
@@ -56,7 +66,20 @@ impl Kind {
             Kind::AndroidAvd => "recreate in Android Studio (settings and data are lost)",
             Kind::OldInstaller => "download it again from the vendor",
             Kind::LargeFile => "not restorable, check before deleting",
+            Kind::DockerBuildCache => "rebuilt on the next docker build (slower first build)",
+            Kind::DockerDanglingImage => "untagged leftovers; rebuilt or re-pulled if ever needed",
+            Kind::DockerImage => "docker pull, or rebuild from its Dockerfile",
+            Kind::DockerVolume => "not restorable, may hold database or app data",
+            Kind::DockerContainer => "recreate with docker run; changes inside it are lost",
         }
+    }
+
+    /// Docker items live inside Docker, so they are pruned through the Docker CLI and can't be quarantined.
+    pub fn is_docker(self) -> bool {
+        matches!(
+            self,
+            Kind::DockerBuildCache | Kind::DockerDanglingImage | Kind::DockerImage | Kind::DockerVolume | Kind::DockerContainer
+        )
     }
 }
 
