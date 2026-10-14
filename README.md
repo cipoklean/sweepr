@@ -5,7 +5,7 @@
 - **Safe to clean**: things that come back on their own (`node_modules`, Rust `target/`, virtualenvs, `__pycache__`, Gradle build output, `.next/`, package caches) in projects you haven't touched for a while.
 - **Needs you**: things only you can judge (large files, old installers in Downloads, Android emulator images, and anything inside a repo with uncommitted or unpushed work).
 
-> Status: early. Sweepr only **reports** for now. It never deletes anything.
+> Status: early. `sweepr clean` never deletes anything outright: it moves items to a quarantine you can undo for 7 days.
 
 ## Try it
 
@@ -14,7 +14,15 @@ cargo run -- scan                 # scan your home folder
 cargo run -- scan ~/code          # scan one folder
 cargo run -- scan --idle-days 60  # call a project idle after 60 days
 cargo run -- scan --json          # machine-readable output
+
+cargo run -- clean --dry-run      # see what clean would move
+cargo run -- clean                # move every Safe item to quarantine (asks first)
+cargo run -- quarantine           # list cleaned batches and days left to undo
+cargo run -- undo                 # put the latest batch back
+cargo run -- purge                # delete batches older than 7 days for good
 ```
+
+`clean` only ever touches the **Safe to clean** list. **Needs you** items are never moved. Undo refuses to overwrite anything that has since appeared at the original path, and items on another drive are skipped rather than copied. Quarantine lives in your OS data folder (set `SWEEPR_HOME` to move it); expired batches are cleared the next time you run `clean`.
 
 Example:
 
@@ -43,7 +51,7 @@ NEEDS YOU  52.4 GB  (12 items)
 ## Roadmap
 
 1. ~~Scanner and size report~~
-2. Clean command with a 7-day quarantine and undo
+2. ~~Clean command with a 7-day quarantine and undo~~
 3. Docker images, volumes and build cache
 4. AI notes that explain every item in plain words (metadata only, never file contents)
 5. Terminal UI, then a desktop app
